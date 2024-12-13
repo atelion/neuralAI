@@ -18,9 +18,9 @@ def get_args():
     parser.add_argument("--text2image_path", default="weights/hunyuanDiT", type=str)
     parser.add_argument("--save_folder", default="outputs/", type=str)
     parser.add_argument("--device", default="cuda:0", type=str)
-    parser.add_argument("--t2i_seed", default=0, type=int)
+    parser.add_argument("--t2i_seed", default=42, type=int)
     parser.add_argument("--t2i_steps", default=25, type=int)
-    parser.add_argument("--gen_seed", default=0, type=int)
+    parser.add_argument("--gen_seed", default=42, type=int)
     parser.add_argument("--gen_steps", default=50, type=int)
     parser.add_argument("--max_faces_num", default=90000, type=int)
     parser.add_argument("--save_memory", default=False, action="store_true")
@@ -32,12 +32,25 @@ def get_args():
 args = get_args()
 
 # Initialize models globally
-rembg_model = Removebg()
-image_to_views_model = Image2Views(device=args.device, use_lite=args.use_lite)
-views_to_mesh_model = Views2Mesh(args.mv23d_cfg_path, args.mv23d_ckt_path, args.device, use_lite=args.use_lite)
+# rembg_model = Removebg()
+# image_to_views_model = Image2Views(device=args.device, use_lite=args.use_lite)
+# views_to_mesh_model = Views2Mesh(args.mv23d_cfg_path, args.mv23d_ckt_path, args.device, use_lite=args.use_lite)
 text_to_image_model = Text2Image(pretrain=args.text2image_path, device=args.device, save_memory=args.save_memory)
 if args.do_render:
     gif_renderer = GifRenderer(device=args.device)
+
+
+os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
+os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
+                                            # 'auto' is faster but will do benchmarking at the beginning.
+                                            # Recommended to set to 'native' if run only once.
+
+from TRELLIS.trellis.pipelines import TrellisImageTo3DPipeline
+from TRELLIS.trellis.utils import render_utils, postprocessing_utils
+
+
+pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
+pipeline.cuda()
 
 def process_image_to_3d(res_rgb_pil, output_folder):
     os.makedirs(output_folder, exist_ok=True)
@@ -71,6 +84,22 @@ def process_image_to_3d(res_rgb_pil, output_folder):
             gif_dst_path=os.path.join(output_folder, 'output.gif'),
         )
 
+
+def gen_3d(image, output_folder):
+    outputs = pipeline.run(
+        image,        
+        seed=1,        
+    )
+    # GLB files can be extracted from the outputs
+    glb = postprocessing_utils.to_glb(
+        outputs['gaussian'][0],
+        outputs['mesh'][0],
+        # Optional parameters
+        simplify=0.95,          # Ratio of triangles to remove in the simplification process
+        texture_size=1024,      # Size of the texture used for the GLB
+    )
+    glb.export(os.path.join(output_folder, "mesh.glb"))
+
 @app.post("/generate_from_text")
 async def text_to_3d(prompt: str = Body()):
     output_folder = os.path.join(args.save_folder, "text_to_3d")
@@ -85,7 +114,8 @@ async def text_to_3d(prompt: str = Body()):
     )
     res_rgb_pil.save(os.path.join(output_folder, "img.jpg"))
 
-    process_image_to_3d(res_rgb_pil, output_folder)
+    # process_image_to_3d(res_rgb_pil, output_folder)
+    gen_3d(res_rgb_pil, output_folder)
     
     print(f"Successfully generated: {output_folder}")
     print(f"Generation time: {time.time() - start}")
@@ -106,5 +136,33 @@ async def image_to_3d(image_path: str):
 
     return {"message": "3D model generated successfully from image", "output_folder": output_folder}
 
+def _text_to_3d(prompt: str):
+    output_folder = os.path.join(args.save_folder, "test")
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Stage 1: Text to Image
+    start = time.time()
+    res_rgb_pil = text_to_image_model(
+        prompt,
+        seed=args.t2i_seed,
+        steps=25
+    )
+    res_rgb_pil.save(os.path.join(output_folder, "img.jpg"))
+
+    # process_image_to_3d(res_rgb_pil, output_folder)
+    gen_3d(res_rgb_pil, output_folder)
+    
+    print(f"Successfully generated: {output_folder}")
+    print(f"Generation time: {time.time() - start}")
+
+    return {"success": True, "path": output_folder}
+
 if __name__ == "__main__":
+    # image = Image.open("tractor.png")
+    # gen_3d(image, "outputs")
+    # _text_to_3d("abandoned mining cart with rust damage and coal residue")
     uvicorn.run(app, host="0.0.0.0", port=args.port)
+
+
+
+

@@ -163,6 +163,7 @@ testing/
 validation/results
 validation/test
 generate/outputs
+generate/venv
 
 # Editors
 .vscode/settings.json
